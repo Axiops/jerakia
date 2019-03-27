@@ -16,7 +16,7 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
     [ TrueClass, FalseClass ].include?(opt.class)
   }
 
-  # Recursive will return the entire data structure from console
+  # Recursive will return the entire data structure from consul
   # rather than just the requested key
   #
   option(:recursive, :default => false) { |opt|
@@ -44,45 +44,93 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
     end
   end
 
-
-
   # Entrypoint for Jerakia lookups starts here.
   #
   def lookup
-
-    Jerakia.log.debug("[datasource::console_kv] backend performing lookup for #{request.key}")
-    paths = options[:searchpath].reject { |p| p.nil? }
-
     key = request.key
     namespace = request.namespace
 
+    # Some options combinations don't make sense so fail early
+    # We support keyless lookups with
+    # - :to_hash and :resursive both true
+    # - :to_hash and :resursive both false (the namespace becomes the key and we parse the result)
+    # If a key is specified, then it can't be recursive
+    #
+    if key.nil?
+      raise Jerakia::Error, "Invalid combination of options for keyless lookup. :recursive and :to_hash need to both true or false" unless
+        (options[:recursive] and options[:to_hash]) or (not options[:recursive] and not options[:to_hash])
+    else
+      raise Jerakia::Error, "Recursive is only for keyless lookups" if options[:recursive]
+    end
 
-    answer do |response|
+    Jerakia.log.debug("[datasource::consul_kv] backend performing lookup for namespace:#{namespace[0]} and #{key.nil? ? 'no key' : 'key:' + key}")
+    paths = options[:searchpath].reject { |p| p.nil? }
 
-      break if paths.empty?
-      path = paths.shift.split('/').compact
+    reply do |response|
+      paths.each do |path|
+        split_path = path.split('/').compact
 
+        split_path << namespace
+        split_path << key unless key.nil?
 
-      path << namespace
-      path << key unless key.nil?
+        diplomat_options = {
+          :recurse => options[:recursive],
+          :convert_to_hash => options[:to_hash],
+          :dc => options[:datacenter],
+        }
 
-      diplomat_options = {
-        :recurse => options[:recursive],
-        :convert_to_hash => options[:to_hash],
-        :dc => options[:datacenter],
-      }
+        begin
+          key_path = split_path.flatten.join('/')
+          Jerakia.log.debug("[datasource::consul_kv] Looking up #{key_path} with options #{diplomat_options}")
+          data = Diplomat::Kv.get(key_path, diplomat_options)
+          Jerakia.log.debug("Retrieved #{data} from consul")
+        rescue Diplomat::KeyNotFound => e
+          Jerakia.log.debug("NotFound encountered, skipping to next path entry")
+          next
+        rescue Faraday::ConnectionFailed => e
+          raise Jerakia::Error, "Failed to connect to consul service: #{e.message}"
+          break
+        end
 
-      begin
-       key_path = path.flatten.join('/')
-       Jerakia.log.debug("[datasource::consul_kv] Looking up #{key_path} with options #{diplomat_options}")
-       result = Diplomat::Kv.get(key_path, diplomat_options)
-      rescue Diplomat::KeyNotFound => e
-        Jerakia.log.debug("NotFound encountered, skipping to next path entry")
-        next
-      rescue Faraday::ConnectionFailed => e
-        raise Jerakia::Error, "Failed to connect to consul service: #{e.message}"
+        if options[:to_hash]
+          parsed_data = dig(data, split_path.flatten)
+        else
+          # Try to parse the data if we are not using :to_hash
+          # Will try JSON, YAML, and HCL and if neither works we assume it's raw string
+          begin
+            parsed_data = JSON.parse(data)
+            Jerakia.log.debug("Data was in JSON format")
+          rescue JSON::ParserError
+            parsed_data = YAML.load(data)
+            Jerakia.log.debug("Data was in YAML format")
+          rescue SyntaxError
+            if HCL::Checker.valid? data
+              parsed_data = HCL::Checker.parse(data)
+            Jerakia.log.debug("Data was in HCL format")
+            else
+              parsed_data = data
+            end
+          end
+        end
+        Jerakia.log.debug("Parsed data is #{parsed_data}")
+
+        if parsed_data.is_a?(Hash)
+          response.namespace(namespace).submit parsed_data
+        else
+          response.namespace(namespace).key(key).ammend(parsed_data) unless key.nil?
+        end
       end
-      response.submit result
+    end
+  end
+
+  private
+  # Helper method to "dig" the keys from result if using :to_hash
+  def dig(hash, paths)
+    match = hash[paths.shift]
+    if paths.empty? or match.nil?
+      return match
+    else
+      return dig(match, paths)
     end
   end
 end
