@@ -1,4 +1,5 @@
 require 'diplomat'
+require 'hcl/checker'
 require 'uri'
 
 class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
@@ -96,19 +97,22 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
           parsed_data = dig(data, split_path.flatten)
         else
           # Try to parse the data if we are not using :to_hash
-          # Will try JSON, YAML, and HCL and if neither works we assume it's raw string
+          # Will try HCL, JSON and YAML and if neither works we assume it's raw string
           begin
-            parsed_data = JSON.parse(data)
-            Jerakia.log.debug("Data was in JSON format")
-          rescue JSON::ParserError
-            parsed_data = YAML.load(data)
-            Jerakia.log.debug("Data was in YAML format")
-          rescue SyntaxError
-            if HCL::Checker.valid? data
-              parsed_data = HCL::Checker.parse(data)
+            parsed_data = HCL::Checker.parse(data)
             Jerakia.log.debug("Data was in HCL format")
-            else
-              parsed_data = data
+          rescue HCLLexer::ScanError
+            begin
+              parsed_data = JSON.parse(data)
+              Jerakia.log.debug("Data was in JSON format")
+            rescue JSON::ParserError
+              begin
+                parsed_data = YAML.load(data)
+                Jerakia.log.debug("Data was in YAML format")
+              rescue SyntaxError
+                parsed_data = data
+                Jerakia.log.debug("Cannot parse data, leaving as raw string")
+              end
             end
           end
         end

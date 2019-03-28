@@ -27,5 +27,5 @@ Gem::Specification.new do |s|
   s.add_runtime_dependency 'msgpack', '~> 1.1'
   s.add_runtime_dependency 'diplomat', '~> 2.0'
   s.add_runtime_dependency 'bigdecimal', '~> 1.4'
-
+  s.add_runtime_dependency 'hcl-checker', '~> 1.1'
 end
