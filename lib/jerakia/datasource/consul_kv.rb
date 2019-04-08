@@ -72,7 +72,7 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
 
     reply do |response|
       paths.each do |path|
-        split_path = path.split('/').compact
+        split_path = path.split('/').reject { |p| p.empty? }
 
         split_path << namespace
         split_path << key unless key.nil?
