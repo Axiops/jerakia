@@ -75,7 +75,9 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
         split_path = path.split('/').reject { |p| p.empty? }
 
         split_path << namespace
-        split_path << key unless key.nil?
+        # Don't append the key if we are parsing values so we can support key
+        # lookups with the key inside a value
+        split_path << key unless key.nil? || options[:parse_values]
 
         diplomat_options = {
           :convert_to_hash => options[:to_hash],
@@ -115,7 +117,11 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
           if key.nil?
             response.namespace(namespace).submit @data
           else
-          response.namespace(namespace).key(key).ammend(@data)
+            if options[:parse_values]
+              response.namespace(namespace).key(key).ammend(@data[key])
+            else
+              response.namespace(namespace).key(key).ammend(@data)
+            end
           end
         when Array
           @data.each do |partial_data|
