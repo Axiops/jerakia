@@ -47,6 +47,15 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
     [ TrueClass, FalseClass ].include?(opt.class)
   }
 
+  # follow_references will try detect if any keys begin with the reference_prefix
+  # and if so it will add the reference to the searchpath
+  option(:follow_references, :default => false) { |opt|
+    [ TrueClass, FalseClass ].include?(opt.class)
+  }
+
+  # the prefix used to indicate to follow a reference to another path
+  option(:reference_prefix, :default => '@|') { |str| str.is_a?(String) }
+
   # Set any consul parameters against the Diplomat class
   #
   # These values are set in jerakia.yaml and are loaded directly
@@ -69,9 +78,10 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
 
     Jerakia.log.debug("[datasource::consul_kv] backend performing lookup for namespace:#{namespace[0]} and #{key.nil? ? 'no key' : 'key:' + key}")
     paths = options[:searchpath].reject { |p| p.nil? }
+    Jerakia.log.debug("Paths to be looked up: #{paths}")
 
     reply do |response|
-      paths.each do |path|
+      paths.each_with_index do |path, index|
         split_path = path.split('/').reject { |p| p.empty? }
 
         split_path << namespace
@@ -108,6 +118,16 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
         #
         trim_paths(split_path.flatten)
         Jerakia.log.debug("Trimmed path data is #{@data}")
+
+        # Check if we want to follow references if data is a string
+        if options[:follow_references] and @data.is_a?(String)
+          if @data.start_with?(options[:reference_prefix])
+            reference = @data.gsub(options[:reference_prefix], '')
+            Jerakia.log.debug("Data contains reference to #{reference}. Inserting and skipping")
+            paths.insert(index + 1, reference)
+            next
+          end
+        end
 
         parse_data if options[:parse_values]
         Jerakia.log.debug("Parsed data is #{@data}")
@@ -183,9 +203,13 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
     else
       # Will try HCL, JSON and YAML and if neither works we assume it's raw string
       begin
-        parsed_value = HCL::Checker.parse(value)
-        Jerakia.log.debug("Data is in HCL format")
-      rescue HCLLexer::ScanError
+        if HCL::Checker.valid? value
+          parsed_value = HCL::Checker.parse(value)
+          Jerakia.log.debug("Data is in HCL format")
+        else
+          raise StandardError.new "Data is not in HCL format"
+        end
+      rescue HCLLexer::ScanError, StandardError
         begin
           parsed_value = JSON.parse(value)
           Jerakia.log.debug("Data is in JSON format")
@@ -193,7 +217,7 @@ class Jerakia::Datasource::Consul_kv < Jerakia::Datasource::Instance
           begin
             parsed_value = YAML.load(value)
             Jerakia.log.debug("Data is in YAML format")
-          rescue SyntaxError
+          rescue Psych::SyntaxError
             parsed_value = value
             Jerakia.log.debug("Data is not in any supported format, leaving as raw string")
           end
